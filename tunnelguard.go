@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"net"
 	"regexp"
-	"strings"
 	"sync"
 	"time"
 
@@ -18,7 +17,7 @@ const (
 	defaultWaitSeconds = 30
 )
 
-var hostnameRegex = regexp.MustCompile(`^[a-zA-Z0-9.-]+$`)
+var hostnameRegex = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$`)
 
 type WireguardDriver interface {
 	GetPeers() ([]Peer, error)
@@ -152,13 +151,12 @@ func (t *Tunnelguard) resetPeer(peer Peer) {
 }
 
 func isStaticEndpoint(endpoint string) (bool, error) {
-	parts := strings.Split(endpoint, ":")
-	if len(parts) < 2 {
-		return false, errors.New("invalid format (missing port)")
+	host, _, err := net.SplitHostPort(endpoint)
+	if err != nil {
+		return false, err
 	}
 
-	address := parts[0]
-	if ip := net.ParseIP(address); ip != nil {
+	if ip := net.ParseIP(host); ip != nil {
 		if ip.To4() != nil {
 			return true, nil
 		} else if ip.To16() != nil {
@@ -166,7 +164,7 @@ func isStaticEndpoint(endpoint string) (bool, error) {
 		}
 	}
 
-	if hostnameRegex.MatchString(address) {
+	if hostnameRegex.MatchString(host) {
 		return false, nil
 	}
 
