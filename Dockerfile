@@ -10,7 +10,7 @@ RUN go mod download
 RUN CGO_ENABLED=0 go build -o /tunnelguard .
 
 
-FROM alpine:3.20.3 AS final
+FROM alpine:3.21.2 AS final
 
 LABEL maintainer="soerenschneider"
 COPY --from=build /tunnelguard /tunnelguard
