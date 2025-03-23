@@ -8,8 +8,6 @@ import (
 	"regexp"
 	"sync"
 	"time"
-
-	"github.com/prometheus/client_golang/prometheus"
 )
 
 const (
@@ -38,8 +36,10 @@ type Peer struct {
 }
 
 type Tunnelguard struct {
-	wg   WireguardDriver
-	once sync.Once
+	wg            WireguardDriver
+	niceNames     map[string]string
+	once          sync.Once
+	metricsWriter *MetricsWriter
 }
 
 func (t *Tunnelguard) Loop(ctx context.Context, wg *sync.WaitGroup) {
@@ -48,6 +48,7 @@ func (t *Tunnelguard) Loop(ctx context.Context, wg *sync.WaitGroup) {
 
 		maxHandshakeAge := t.conditionallyResetPeers()
 		delay := time.Second * time.Duration(maxHandshakeAge)
+		silenceMetricsWriterWarnLogs := false
 
 		for {
 			select {
@@ -56,6 +57,15 @@ func (t *Tunnelguard) Loop(ctx context.Context, wg *sync.WaitGroup) {
 			case <-time.After(delay):
 				maxHandshakeAge := t.conditionallyResetPeers()
 				delay = time.Second * time.Duration(maxHandshakeAge)
+
+				if t.metricsWriter != nil {
+					if err := t.metricsWriter.Dump(); err != nil && !silenceMetricsWriterWarnLogs {
+						silenceMetricsWriterWarnLogs = true
+						slog.Warn("can not write metrics data", "err", err)
+					} else {
+						silenceMetricsWriterWarnLogs = false
+					}
+				}
 			}
 		}
 	})
@@ -78,15 +88,13 @@ func (t *Tunnelguard) conditionallyFixTunnel() {
 }
 
 func (t *Tunnelguard) conditionallyResetPeers() float64 {
-	MetricHeartBeat.SetToCurrentTime()
+	metrics.Heartbeat = time.Now().Unix()
 	peers, err := t.wg.GetPeers()
+
 	if err != nil {
 		slog.Error("can't get WireGuard peers", "error", err)
 		t.conditionallyFixTunnel()
-		labels := prometheus.Labels{
-			"error": "get_peers",
-		}
-		MetricErrorsTotal.With(labels).Inc()
+		metrics.ErrorsTotal["get_peers"]++
 		return defaultWaitSeconds
 	}
 
@@ -100,7 +108,11 @@ func (t *Tunnelguard) conditionallyResetPeers() float64 {
 			if timeSinceHandshake.Seconds() > maxHandshakeAge {
 				maxHandshakeAge = timeSinceHandshake.Seconds()
 			}
-			MetricLatestHandshakeTimestamp.WithLabelValues(peer.PublicKey).Set(float64(peer.HandshakeLastSeen.Unix()))
+			if metrics.LatestHandshakeTimestamp[peer.PublicKey] == nil {
+				metrics.LatestHandshakeTimestamp[peer.PublicKey] = &peerMetricValue{}
+			}
+			metrics.LatestHandshakeTimestamp[peer.PublicKey].Value = peer.HandshakeLastSeen.Unix()
+			metrics.LatestHandshakeTimestamp[peer.PublicKey].NiceName = t.niceNames[peer.PublicKey]
 		}
 
 		if hasLastSeen && time.Since(*peer.HandshakeLastSeen) >= handshakeTimeout {
@@ -117,10 +129,7 @@ func (t *Tunnelguard) conditionallyResetPeers() float64 {
 func (t *Tunnelguard) resetPeer(peer Peer) {
 	endpoint, err := t.wg.GetEndpoint(peer.PublicKey)
 	if err != nil {
-		labels := prometheus.Labels{
-			"error": "get_endpoint",
-		}
-		MetricErrorsTotal.With(labels).Inc()
+		metrics.ErrorsTotal["get_endpoint"]++
 		slog.Error("could not get endpoint", "pub_key", peer.PublicKey)
 
 		t.conditionallyFixTunnel()
@@ -137,15 +146,15 @@ func (t *Tunnelguard) resetPeer(peer Peer) {
 		return
 	}
 
-	MetricPeerResets.WithLabelValues(peer.PublicKey).Inc()
+	if metrics.PeerResets[peer.PublicKey] == nil {
+		metrics.PeerResets[peer.PublicKey] = &peerMetricValue{}
+	}
+	metrics.PeerResets[peer.PublicKey].Value = metrics.PeerResets[peer.PublicKey].Value + 1
+	metrics.PeerResets[peer.PublicKey].NiceName = t.niceNames[peer.PublicKey]
 	slog.Info("resetting peer", "endpoint", endpoint, "pub_key", peer.PublicKey)
 	if err := t.wg.ResetPeer(peer.PublicKey, endpoint); err != nil {
 		slog.Error("failed to reset peer", "error", err)
-		labels := prometheus.Labels{
-			"error": "reset_peer",
-		}
-		MetricErrorsTotal.With(labels).Inc()
-
+		metrics.ErrorsTotal["reset_peer"]++
 		t.conditionallyFixTunnel()
 	}
 }

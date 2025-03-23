@@ -1,138 +1,87 @@
 package main
 
 import (
-	"bytes"
-	"context"
-	"errors"
 	"fmt"
-	"log/slog"
-	"net/http"
-	"net/url"
+	"log"
 	"os"
-	"strings"
-	"sync"
+	"text/template"
 	"time"
-
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/prometheus/common/expfmt"
-	"golang.org/x/sys/unix"
 )
 
-const (
-	namespace = "tunnelguard"
-)
+const templateData = `# HELP tunnelguard_heartbeat_timestamp_seconds the timestamp of the invocation
+# TYPE tunnelguard_heartbeat_timestamp_seconds gauge
+tunnelguard_heartbeat_timestamp_seconds {{ .Heartbeat }}
+{{- if gt (len .ErrorsTotal) 0 }}
+# HELP tunnelguard_errors_total Number of errors.
+# TYPE tunnelguard_errors_total counter
+{{- range $key, $value := .ErrorsTotal }}
+tunnelguard_errors_total{error="{{ $key }}"} {{ $value }}
+{{- end }}
+{{- end }}
+{{- if gt (len .PeerResets) 0 }}
+# HELP tunnelguard_resets_total Number of SSH restart errors encountered.
+# TYPE tunnelguard_resets_total counter
+{{- range $key, $value := .PeerResets }}
+tunnelguard_peers_resets_total{pub_key="{{ $key }}",nice_name="{{ $value.NiceName }}"} {{ $value.Value }}
+{{- end }}
+{{- end }}
+{{- if gt (len .LatestHandshakeTimestamp) 0 }}
+# HELP tunnelguard_peers_latest_handshake_timestap_seconds the timestamp of a peer's most recent handshake
+# TYPE tunnelguard_peers_latest_handshake_timestap_seconds gauge
+{{- range $key, $value := .LatestHandshakeTimestamp }}
+tunnelguard_peers_latest_handshake_timestap_seconds{pub_key="{{ $key }}",nice_name="{{ $value.NiceName }}"} {{ $value.Value }}
+{{- end }}
+{{- end }}
+`
 
-var (
-	MetricHeartBeat = promauto.NewGauge(prometheus.GaugeOpts{
-		Namespace: namespace,
-		Name:      "heartbeat_timestamp_seconds",
-	})
-
-	MetricErrorsTotal = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: namespace,
-		Name:      "errors_total",
-	}, []string{"error"})
-
-	MetricPeerResets = promauto.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespace,
-		Subsystem: "peers",
-		Name:      "resets_total",
-	}, []string{"pub_key"})
-
-	MetricLatestHandshakeTimestamp = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: namespace,
-		Subsystem: "peers",
-		Name:      "latest_handshake_timestap_seconds",
-	}, []string{"pub_key"})
-)
-
-func StartMetricsServer(addr string) error {
-	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.Handler())
-	server := http.Server{
-		Addr:              addr,
-		ReadTimeout:       3 * time.Second,
-		ReadHeaderTimeout: 3 * time.Second,
-		WriteTimeout:      3 * time.Second,
-		IdleTimeout:       90 * time.Second,
-	}
-
-	if err := server.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
-		return err
-	}
-	return nil
+var metrics = Metrics{
+	Heartbeat:                time.Now().Unix(),
+	ErrorsTotal:              make(map[string]int64),
+	PeerResets:               make(map[string]*peerMetricValue),
+	LatestHandshakeTimestamp: make(map[string]*peerMetricValue),
 }
 
-var once sync.Once
-
-func StartWritingMetrics(ctx context.Context, dir string) error {
-	if err := unix.Access(dir, unix.W_OK); err != nil {
-		return errors.New("path not writable")
-	}
-
-	once.Do(func() {
-		ticker := time.NewTicker(60 * time.Second)
-
-		if err := writeMetrics(dir); err != nil {
-			slog.Error("could not write metrics", "error", err)
-		}
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if err := writeMetrics(dir); err != nil {
-					slog.Error("could not write metrics", "error", err)
-				}
-			}
-		}
-	})
-
-	return nil
+type peerMetricValue struct {
+	Value    int64
+	NiceName string
 }
 
-func writeMetrics(path string) error {
-	path, err := url.JoinPath(path, fmt.Sprintf("%s.prom", namespace))
-	if err != nil {
-		return err
-	}
-
-	metrics, err := dumpMetrics()
-	if err != nil {
-		return err
-	}
-
-	// writing a file is not atomic, write to a file which is ignored by prom and rename it
-	tmpPath := fmt.Sprintf("%s.tmp", path)
-	err = os.WriteFile(tmpPath, []byte(metrics), 0644) // #nosec: G306
-	if err != nil {
-		return err
-	}
-
-	return os.Rename(tmpPath, path)
+type Metrics struct {
+	Heartbeat                int64
+	LastStatusChange         int64
+	ErrorsTotal              map[string]int64
+	PeerResets               map[string]*peerMetricValue
+	LatestHandshakeTimestamp map[string]*peerMetricValue
 }
 
-func dumpMetrics() (string, error) {
-	var buf = &bytes.Buffer{}
-	fmt := expfmt.NewFormat(expfmt.TypeTextPlain)
-	enc := expfmt.NewEncoder(buf, fmt)
+type MetricsWriter struct {
+	tmpl        *template.Template
+	metricsFile string
+}
 
-	families, err := prometheus.DefaultGatherer.Gather()
+func NewMetricsWriter(metricsFile string) (*MetricsWriter, error) {
+	tmpl, err := template.New("metrics").Parse(templateData)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
-	for _, f := range families {
-		// writing all (implicit) metrics will cause a duplication error with other tools writing metrics
-		if strings.HasPrefix(f.GetName(), namespace) {
-			if err := enc.Encode(f); err != nil {
-				slog.Info("could not encode metric", "error", err, "metric", f.GetName())
-			}
-		}
+	return &MetricsWriter{
+		tmpl:        tmpl,
+		metricsFile: metricsFile,
+	}, nil
+}
+
+func (m *MetricsWriter) Dump() error {
+	tmpFile := fmt.Sprintf("%s.tmp", m.metricsFile)
+	file, err := os.Create(tmpFile)
+	if err != nil {
+		log.Fatalf("Error creating file: %v", err)
+	}
+	defer file.Close()
+
+	if err := m.tmpl.Execute(file, metrics); err != nil {
+		return fmt.Errorf("could not execute template: %w", err)
 	}
 
-	return buf.String(), nil
+	return os.Rename(tmpFile, m.metricsFile)
 }

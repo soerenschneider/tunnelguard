@@ -4,26 +4,23 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log"
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 )
 
 var (
-	opts             = Options{}
 	flagPrintVersion bool
+	flagConfigFile   string
+	flagDebug        bool
+
+	BuildVersion string
+	CommitHash   string
 )
-
-type Options struct {
-	Interface  string
-	ConfigFile string
-	Debug      bool
-
-	MetricsAddr string
-	MetricsDir  string
-}
 
 func main() {
 	parseFlags()
@@ -33,46 +30,45 @@ func main() {
 		os.Exit(0)
 	}
 
-	setupLogger(opts.Debug)
+	setupLogger(flagDebug)
 	slog.Info("Starting tunnelguard", "version", BuildVersion)
 
-	wgDriver, err := NewWgCli(opts.Interface, opts.ConfigFile)
+	config, err := readConfig(flagConfigFile)
 	if err != nil {
-		slog.Error("could not build wg driver", "error", err)
+		log.Fatal("could not read config: ", err)
+	}
+
+	wgDriver, err := NewWgCli(config.Interface, config.ConfigFile)
+	if err != nil {
+		slog.Error("could not build wg driver", "err", err)
+		os.Exit(1)
+	}
+
+	metricsWriter, err := buildMetricsWriter(config)
+	if err != nil {
+		slog.Error("could not build metrics writer", "err", err)
 		os.Exit(1)
 	}
 
 	tunnelguard := Tunnelguard{
-		wg: wgDriver,
+		wg:            wgDriver,
+		metricsWriter: metricsWriter,
+		niceNames:     config.NiceNames,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	wait := &sync.WaitGroup{}
 	wait.Add(1)
 	go func() {
-		tunnelguard.Loop(ctx, wait)
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, syscall.SIGINT)
+
+		<-sig
+		slog.Info("Got signal, quitting")
+		cancel()
 	}()
 
-	go func() {
-		if len(opts.MetricsAddr) > 0 {
-			if err := StartMetricsServer(opts.MetricsAddr); err != nil {
-				slog.Error("could not start metrics server", "error", err)
-				os.Exit(1)
-			}
-		} else if len(opts.MetricsDir) > 0 {
-			if err := StartWritingMetrics(ctx, opts.MetricsDir); err != nil {
-				slog.Error("could not start metrics writer", "error", err)
-				os.Exit(1)
-			}
-		}
-	}()
-
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT)
-
-	<-sig
-	slog.Info("Got signal, quitting")
-	cancel()
+	tunnelguard.Loop(ctx, wait)
 	wait.Wait()
 }
 
@@ -91,11 +87,28 @@ func setupLogger(verbose bool) {
 }
 
 func parseFlags() {
+	flag.StringVar(&flagConfigFile, "config", "", "Path of config file")
 	flag.BoolVar(&flagPrintVersion, "version", false, "Print version and exit")
-	flag.BoolVar(&opts.Debug, "debug", false, "Print debug logs")
-	flag.StringVar(&opts.Interface, "int", "wg0", "WireGuard interface")
-	flag.StringVar(&opts.ConfigFile, "config", "/etc/wireguard/wg0.conf", "WireGuard config file")
-	flag.StringVar(&opts.MetricsAddr, "metrics-addr", "", "Start metrics server")
-	flag.StringVar(&opts.MetricsDir, "metrics-dir", "/var/lib/node_exporter", "Dir to write metrics to")
+	flag.BoolVar(&flagDebug, "debug", false, "Print debug logs")
 	flag.Parse()
+}
+
+func buildMetricsWriter(config *TunnelguardConfig) (*MetricsWriter, error) {
+	if config.MetricsFile == "" {
+		return nil, nil
+	}
+
+	basePath := filepath.Dir(config.MetricsFile)
+	_, err := os.Stat(basePath)
+
+	if err != nil && os.IsNotExist(err) {
+		isUsingDefaultValue := config.MetricsFile == defaultMetricsFile
+		if isUsingDefaultValue {
+			slog.Warn("Disabling metrics writer, path does not exist", "path", basePath)
+		} else {
+			return nil, fmt.Errorf("base path for writing metrics does not exist: %w", err)
+		}
+	}
+
+	return NewMetricsWriter(config.MetricsFile)
 }
