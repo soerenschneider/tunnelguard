@@ -53,7 +53,7 @@ func main() {
 	tunnelguard := Tunnelguard{
 		wg:            wgDriver,
 		metricsWriter: metricsWriter,
-		niceNames:     config.NiceNames,
+		niceNames:     config.PublicKeyDict,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
