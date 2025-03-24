@@ -142,7 +142,7 @@ func (t *Tunnelguard) resetPeer(peer Peer) {
 
 	endpointIsStatic, _ := isStaticEndpoint(endpoint)
 	if endpointIsStatic {
-		slog.Info("not resetting peer, endpoint is static", "endpoint", endpoint, "pub_key", peer.PublicKey)
+		slog.Debug("not resetting peer, endpoint is static", "endpoint", endpoint, "pub_key", peer.PublicKey)
 		return
 	}
 
