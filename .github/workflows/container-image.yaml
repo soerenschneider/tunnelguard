@@ -48,3 +48,6 @@ jobs:
           push: true
           tags: ${{ steps.gcr.outputs.tags }}
           labels: ${{ steps.gcr.outputs.labels }}
+          build-args: |
+            VERSION=dev
+            COMMIT_HASH=${{ github.sha }}
