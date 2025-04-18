@@ -8,7 +8,10 @@ import (
 	"time"
 )
 
-const templateData = `# HELP tunnelguard_heartbeat_timestamp_seconds the timestamp of the invocation
+const templateData = `# HELP tunnelguard_version version information for the running binary
+# TYPE tunnelguard_version gauge
+tunnelguard_version{app="{{ index .Version "app" }}",go="{{ index .Version "go" }}"} 1
+# HELP tunnelguard_heartbeat_timestamp_seconds the timestamp of the invocation
 # TYPE tunnelguard_heartbeat_timestamp_seconds gauge
 tunnelguard_heartbeat_timestamp_seconds {{ .Heartbeat }}
 {{- if gt (len .ErrorsTotal) 0 }}
@@ -35,6 +38,10 @@ tunnelguard_peers_latest_handshake_timestap_seconds{pub_key="{{ $key }}",nice_na
 `
 
 var metrics = Metrics{
+	Version: map[string]string{
+		"go":  GoVersion,
+		"app": BuildVersion,
+	},
 	Heartbeat:                time.Now().Unix(),
 	ErrorsTotal:              make(map[string]int64),
 	PeerResets:               make(map[string]*peerMetricValue),
@@ -47,6 +54,7 @@ type peerMetricValue struct {
 }
 
 type Metrics struct {
+	Version                  map[string]string
 	Heartbeat                int64
 	LastStatusChange         int64
 	ErrorsTotal              map[string]int64

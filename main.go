@@ -20,18 +20,19 @@ var (
 
 	BuildVersion string
 	CommitHash   string
+	GoVersion    string
 )
 
 func main() {
 	parseFlags()
 
 	if flagPrintVersion {
-		fmt.Println(BuildVersion)
+		fmt.Println(fmt.Sprintf("%s %s go%s", BuildVersion, CommitHash, GoVersion))
 		os.Exit(0)
 	}
 
 	setupLogger(flagDebug)
-	slog.Info("Starting tunnelguard", "version", BuildVersion)
+	slog.Info("Starting tunnelguard", "version", BuildVersion, "go", GoVersion)
 
 	config, err := readConfig(flagConfigFile)
 	if err != nil {

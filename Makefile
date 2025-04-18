@@ -15,7 +15,7 @@ clean:
 	rm -rf ./$(BUILD_DIR)
 
 build: version-info
-	CGO_ENABLED=0 go build -ldflags="-X 'main.BuildVersion=${VERSION}' -X 'main.CommitHash=${COMMIT_HASH}'" -o $(BINARY_NAME) .
+	CGO_ENABLED=0 go build -ldflags="-X 'main.BuildVersion=${VERSION}' -X 'main.CommitHash=${COMMIT_HASH}' -X 'main.GoVersion=${GO_VERSION}'" -o $(BINARY_NAME) .
 
 release: clean version-info cross-build
 	cd $(BUILD_DIR) && sha256sum * > $(CHECKSUM_FILE) && cd -
@@ -25,13 +25,14 @@ signed-release: release
 	gh-upload-assets -o soerenschneider -r vault-pki-cli -f ~/.gh-token builds
 
 cross-build: version-info
-	GOOS=linux GOARCH=amd64 CGO_ENABLED=0       go build -ldflags="-w -X 'main.BuildVersion=${VERSION}' -X 'main.CommitHash=${COMMIT_HASH}'" -o $(BUILD_DIR)/$(BINARY_NAME)-linux-amd64     .
-	GOOS=linux GOARCH=arm GOARM=6 CGO_ENABLED=0 go build -ldflags="-w -X 'main.BuildVersion=${VERSION}' -X 'main.CommitHash=${COMMIT_HASH}'" -o $(BUILD_DIR)/$(BINARY_NAME)-linux-armv6     .
-	GOOS=linux GOARCH=arm64 CGO_ENABLED=0       go build -ldflags="-w -X 'main.BuildVersion=${VERSION}' -X 'main.CommitHash=${COMMIT_HASH}'" -o $(BUILD_DIR)/$(BINARY_NAME)-linux-aarch64   .
+	GOOS=linux GOARCH=amd64 CGO_ENABLED=0       go build -ldflags="-w -X 'main.BuildVersion=${VERSION}' -X 'main.CommitHash=${COMMIT_HASH}' -X 'main.GoVersion=${GO_VERSION}'" -o $(BUILD_DIR)/$(BINARY_NAME)-linux-amd64     .
+	GOOS=linux GOARCH=arm GOARM=6 CGO_ENABLED=0 go build -ldflags="-w -X 'main.BuildVersion=${VERSION}' -X 'main.CommitHash=${COMMIT_HASH}' -X 'main.GoVersion=${GO_VERSION}'" -o $(BUILD_DIR)/$(BINARY_NAME)-linux-armv6     .
+	GOOS=linux GOARCH=arm64 CGO_ENABLED=0       go build -ldflags="-w -X 'main.BuildVersion=${VERSION}' -X 'main.CommitHash=${COMMIT_HASH}' -X 'main.GoVersion=${GO_VERSION}'" -o $(BUILD_DIR)/$(BINARY_NAME)-linux-aarch64   .
 
 version-info:
 	$(eval VERSION := $(shell git describe --tags --abbrev=0 || echo "dev"))
 	$(eval COMMIT_HASH := $(shell git rev-parse HEAD))
+	$(eval GO_VERSION := $(shell go version | awk '{print $$3}' | sed 's/^go//'))
 
 fmt:
 	find . -iname "*.go" -exec go fmt {} \; 
