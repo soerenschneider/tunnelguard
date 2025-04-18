@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/soerenschneider/tunnelguard/compare/v1.0.1...v1.1.0) (2025-04-18)
+
+
+### Features
+
+* add metric that holds version info ([138d57d](https://github.com/soerenschneider/tunnelguard/commit/138d57d54d7cdc59d0a337a7971c571c25f55e91))
+
 ## [1.0.1](https://github.com/soerenschneider/tunnelguard/compare/v1.0.0...v1.0.1) (2025-03-23)
 
 
