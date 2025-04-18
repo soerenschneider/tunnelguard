@@ -27,7 +27,7 @@ func main() {
 	parseFlags()
 
 	if flagPrintVersion {
-		fmt.Println(fmt.Sprintf("%s %s go%s", BuildVersion, CommitHash, GoVersion))
+		fmt.Printf("%s %s go%s\n", BuildVersion, CommitHash, GoVersion)
 		os.Exit(0)
 	}
 
