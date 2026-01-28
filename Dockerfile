@@ -13,7 +13,7 @@ RUN go mod download
 RUN CGO_ENABLED=${CGO_ENABLED} go build -ldflags="-w -X 'main.BuildVersion=${VERSION}' -X 'main.CommitHash=${COMMIT_HASH}' -X 'main.GoVersion=$(go version | awk '{print $3}' | sed 's/^go//')'" -o /tunnelguard .
 
 
-FROM alpine:3.21.3 AS final
+FROM alpine:3.23.3 AS final
 
 LABEL maintainer="soerenschneider"
 COPY --from=build /tunnelguard /tunnelguard
