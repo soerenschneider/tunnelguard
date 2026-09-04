@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.1](https://github.com/soerenschneider/tunnelguard/compare/v1.1.0...v1.1.1) (2026-09-04)
+
+
+### Bug Fixes
+
+* do not ignore peers that have a last handshake value of 0 ([8b98ad2](https://github.com/soerenschneider/tunnelguard/commit/8b98ad29d5a92dedbfade25a3e7044cf264bd3a4))
+
 ## [1.1.0](https://github.com/soerenschneider/tunnelguard/compare/v1.0.1...v1.1.0) (2025-04-18)
 
 
