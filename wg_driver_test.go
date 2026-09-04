@@ -1,133 +1,95 @@
 package main
 
 import (
+	"errors"
 	"reflect"
 	"testing"
-	"time"
 )
 
-var (
-	t1 = time.Date(2024, time.September, 5, 17, 45, 18, 0, time.FixedZone("CEST", 2*60*60))
-	t2 = time.Date(2024, time.September, 5, 17, 44, 57, 0, time.FixedZone("CEST", 2*60*60))
-)
-
-type wgTest struct {
+type fakeHandshakeProvider struct {
+	out []byte
+	err error
 }
 
-func (w *wgTest) GetHandshakeData() ([]byte, error) {
-	data := `bbb	1725551118
-ccc		1725551097
-ddd		0
-`
-	return []byte(data), nil
+func (f fakeHandshakeProvider) GetHandshakeData() ([]byte, error) {
+	return f.out, f.err
 }
 
-func TestWg_GetPeers(t *testing.T) {
-	type fields struct {
-		interfaceName string
-		data          HandshakeData
-	}
+func TestGetPeers(t *testing.T) {
 	tests := []struct {
-		name    string
-		fields  fields
-		want    []Peer
-		wantErr bool
+		name      string
+		out       string
+		err       error
+		wantKeys  []string
+		wantNever []string // subset of wantKeys expected to have nil HandshakeLastSeen
+		wantErr   bool
 	}{
 		{
-			name: "happy",
-			fields: fields{
-				interfaceName: "wg0",
-				data:          &wgTest{},
+			name: "three peers, one never handshaked",
+			out: "g5MCSkWzApMkKxUr4KXJ6bQpgGcJnEUsrU80658tEww=\t1788522801\n" +
+				"+M8GnUBdLQSnCdgdCsX8ufS8H+6pw/IlG+L+0IGGjGc=\t1788522878\n" +
+				"Fpmri35N3j6xe44PX7DI/YWNF0mLCL/FF7jWXmeiDl8=\t0\n",
+			wantKeys: []string{
+				"g5MCSkWzApMkKxUr4KXJ6bQpgGcJnEUsrU80658tEww=",
+				"+M8GnUBdLQSnCdgdCsX8ufS8H+6pw/IlG+L+0IGGjGc=",
+				"Fpmri35N3j6xe44PX7DI/YWNF0mLCL/FF7jWXmeiDl8=",
 			},
-			want: []Peer{
-				{
-					PublicKey:         "bbb",
-					HandshakeLastSeen: &t1,
-				},
-				{
-					PublicKey:         "ccc",
-					HandshakeLastSeen: &t2,
-				},
-				{
-					PublicKey:         "ddd",
-					HandshakeLastSeen: nil,
-				},
-			},
-			wantErr: false,
+			wantNever: []string{"Fpmri35N3j6xe44PX7DI/YWNF0mLCL/FF7jWXmeiDl8="},
+		},
+		{
+			name:     "no trailing newline",
+			out:      "aaa=\t1788522801",
+			wantKeys: []string{"aaa="},
+		},
+		{
+			name:      "blank lines skipped",
+			out:       "\naaa=\t1788522801\n\n\nbbb=\t0\n",
+			wantKeys:  []string{"aaa=", "bbb="},
+			wantNever: []string{"bbb="},
+		},
+		{
+			name:     "no peers configured",
+			out:      "",
+			wantKeys: nil,
+		},
+		{
+			name:    "provider failure propagates",
+			err:     errors.New("wg: interface not found"),
+			wantErr: true,
 		},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			w := &WgCli{
-				interfaceName:     tt.fields.interfaceName,
-				handshakeProvider: tt.fields.data,
-			}
-			got, err := w.GetPeers()
-			if (err != nil) != tt.wantErr {
-				t.Errorf("GetPeers() error = %v, wantErr %v", err, tt.wantErr)
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &WgCli{handshakeProvider: fakeHandshakeProvider{out: []byte(tc.out), err: tc.err}}
+			peers, err := w.GetPeers()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
 				return
 			}
-
-			// Compare slices of Peer structs using custom function
-			if len(got) != len(tt.want) {
-				t.Errorf("GetPeers() got length = %d, want length %d", len(got), len(tt.want))
-				return
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
 			}
+			assertKeys(t, peers, tc.wantKeys)
 
-			for i := range got {
-				if !got[i].Equals(&tt.want[i]) {
-					t.Errorf("GetPeers() got = %v, want %v", got[i], tt.want[i])
+			never := map[string]bool{}
+			for _, k := range tc.wantNever {
+				never[k] = true
+			}
+			for _, p := range peers {
+				if got := p.HandshakeLastSeen == nil; got != never[p.PublicKey] {
+					t.Errorf("peer %s: HandshakeLastSeen==nil is %v, want %v",
+						p.PublicKey, got, never[p.PublicKey])
 				}
 			}
 		})
 	}
 }
 
-// Equals method to compare two Peer structs
-func (p *Peer) Equals(other *Peer) bool {
-	if p == nil || other == nil {
-		return p == other
-	}
-
-	if p.PublicKey != other.PublicKey {
-		return false
-	}
-
-	if !timePtrsEqual(p.HandshakeLastSeen, other.HandshakeLastSeen) {
-		return false
-	}
-
-	if !stringPtrsEqual(p.Endpoint, other.Endpoint) {
-		return false
-	}
-
-	return true
-}
-
 func asPtr(a string) *string {
 	return &a
-}
-
-// Helper function to compare two *time.Time pointers
-func timePtrsEqual(a, b *time.Time) bool {
-	if a == nil && b == nil {
-		return true
-	}
-	if a == nil || b == nil {
-		return false
-	}
-	return a.Equal(*b)
-}
-
-// Helper function to compare two *string pointers
-func stringPtrsEqual(a, b *string) bool {
-	if a == nil && b == nil {
-		return true
-	}
-	if a == nil || b == nil {
-		return false
-	}
-	return *a == *b
 }
 
 func TestWg_GetEndpoint(t *testing.T) {

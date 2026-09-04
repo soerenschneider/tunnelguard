@@ -35,6 +35,11 @@ type Peer struct {
 	Endpoint          *string
 }
 
+type peerEvaluation struct {
+	Stale  []Peer
+	MaxAge time.Duration
+}
+
 type Tunnelguard struct {
 	wg            WireguardDriver
 	niceNames     map[string]string
@@ -87,10 +92,34 @@ func (t *Tunnelguard) conditionallyFixTunnel() {
 	}
 }
 
+func evaluatePeers(peers []Peer, now time.Time, timeout time.Duration) peerEvaluation {
+	var ev peerEvaluation
+	for _, peer := range peers {
+		age := timeout // never handshaked == maximally stale
+		if peer.HandshakeLastSeen != nil {
+			age = now.Sub(*peer.HandshakeLastSeen)
+		}
+		if age > ev.MaxAge {
+			ev.MaxAge = age
+		}
+		if age >= timeout {
+			ev.Stale = append(ev.Stale, peer)
+		}
+	}
+	return ev
+}
+
+func nextWaitSeconds(maxAge, timeout time.Duration) float64 {
+	if wait := timeout - maxAge; wait > 0 {
+		return wait.Seconds() + 1
+	}
+	return defaultWaitSeconds
+}
+
 func (t *Tunnelguard) conditionallyResetPeers() float64 {
 	metrics.Heartbeat = time.Now().Unix()
-	peers, err := t.wg.GetPeers()
 
+	peers, err := t.wg.GetPeers()
 	if err != nil {
 		slog.Error("can't get WireGuard peers", "error", err)
 		t.conditionallyFixTunnel()
@@ -98,32 +127,30 @@ func (t *Tunnelguard) conditionallyResetPeers() float64 {
 		return defaultWaitSeconds
 	}
 
-	var maxHandshakeAge float64 = 0
+	ev := evaluatePeers(peers, time.Now(), handshakeTimeout)
+	for _, peer := range ev.Stale {
+		slog.Info("resetting stale peer", "peer", peer.PublicKey, "never_seen", peer.HandshakeLastSeen == nil)
+		t.resetPeer(peer)
+	}
+
+	t.exportHandshakeMetrics(peers)
+
+	return nextWaitSeconds(ev.MaxAge, handshakeTimeout)
+}
+
+func (t *Tunnelguard) exportHandshakeMetrics(peers []Peer) {
 	for _, peer := range peers {
-		hasLastSeen := peer.HandshakeLastSeen != nil
-
-		if hasLastSeen {
-			timeSinceHandshake := time.Since(*peer.HandshakeLastSeen)
-			slog.Debug("time since latest handshake", "latest_handshake", timeSinceHandshake, "peer", peer.PublicKey)
-			if timeSinceHandshake.Seconds() > maxHandshakeAge {
-				maxHandshakeAge = timeSinceHandshake.Seconds()
-			}
-			if metrics.LatestHandshakeTimestamp[peer.PublicKey] == nil {
-				metrics.LatestHandshakeTimestamp[peer.PublicKey] = &peerMetricValue{}
-			}
-			metrics.LatestHandshakeTimestamp[peer.PublicKey].Value = peer.HandshakeLastSeen.Unix()
-			metrics.LatestHandshakeTimestamp[peer.PublicKey].NiceName = t.niceNames[peer.PublicKey]
+		var ts int64
+		if peer.HandshakeLastSeen != nil {
+			ts = peer.HandshakeLastSeen.Unix()
 		}
 
-		if hasLastSeen && time.Since(*peer.HandshakeLastSeen) >= handshakeTimeout {
-			t.resetPeer(peer)
+		if metrics.LatestHandshakeTimestamp[peer.PublicKey] == nil {
+			metrics.LatestHandshakeTimestamp[peer.PublicKey] = &peerMetricValue{}
 		}
+		metrics.LatestHandshakeTimestamp[peer.PublicKey].Value = ts
+		metrics.LatestHandshakeTimestamp[peer.PublicKey].NiceName = t.niceNames[peer.PublicKey]
 	}
-
-	if handshakeTimeout.Seconds()-maxHandshakeAge <= 0 {
-		return defaultWaitSeconds
-	}
-	return (handshakeTimeout.Seconds() - maxHandshakeAge) + 1
 }
 
 func (t *Tunnelguard) resetPeer(peer Peer) {
