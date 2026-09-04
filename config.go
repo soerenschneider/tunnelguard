@@ -15,7 +15,7 @@ type TunnelguardConfig struct {
 	Interface  string `json:"wg_interface_name"`
 	ConfigFile string `json:"wg_config_file"`
 
-	PublicKeyDict map[string]string `json:"pubkey_dict"`
+	PeerNames map[string]string `json:"peer_names"`
 
 	MetricsFile string `json:"metrics_file"`
 }
