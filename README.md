@@ -46,7 +46,7 @@ Tunnelguard uses a simple configuration file that defines the WireGuard interfac
 |-------------------|--------|-----------------------------------------|-------------------------------------------------------------------------------------|
 | wg_interface_name | string | wg0                                     | The name of the WireGuard interface to monitor.                                     |
 | wg_config_file    | string | /etc/wireguard/wg0.conf                 | Path to the WireGuard configuration file.                                           |
-| pubkey_dict       | dict   |                                         | A mapping of WireGuard public keys to human-readable names for logging and metrics. |
+| peer_names        | dict   |                                         | A mapping of WireGuard public keys to human-readable names for logging and metrics. |
 | metrics_file      | string | /var/lib/node_exporter/tunnelguard.prom | File path where Prometheus-compatible metrics are written.                          |
 
 ### Example JSON config
