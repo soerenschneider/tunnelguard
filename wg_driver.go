@@ -90,32 +90,29 @@ func (w *WgCli) ResetPeer(publicKey string, endpoint string) error {
 	return cmd.Run()
 }
 
-func (w *WgCli) GetEndpoint(publicKey string) (string, error) {
-	config, err := parseWireguardConfig(w.configFile)
+func (w *WgCli) AttachEndpoints(peers map[string]Peer) (map[string]Peer, error) {
+	endpoints, err := parseWireguardConfig(w.configFile)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
-	for _, peer := range config.Peers {
-		if peer.PublicKey == publicKey {
-			if peer.Endpoint == nil {
-				return "", nil
-			}
-			return *peer.Endpoint, nil
-		}
+	ret := make(map[string]Peer, len(peers))
+	for pubKey, peer := range peers {
+		peer.Endpoint = endpoints[pubKey]
+		ret[pubKey] = peer
 	}
 
-	return "", fmt.Errorf("public key %s not found", publicKey)
+	return ret, nil
 }
 
-func (w *WgCli) GetPeers() ([]Peer, error) {
+func (w *WgCli) GetPeers() (map[string]Peer, error) {
 	output, err := w.handshakeProvider.GetHandshakeData()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get WireGuard status: %w", err)
 	}
 
 	lines := strings.Split(string(output), "\n")
-	var peers []Peer
+	peers := make(map[string]Peer)
 
 	for _, line := range lines {
 		columns := strings.Fields(line)
@@ -135,11 +132,10 @@ func (w *WgCli) GetPeers() ([]Peer, error) {
 			handshakeLastSeen = &hs
 		}
 
-		peer := Peer{
+		peers[publicKey] = Peer{
 			PublicKey:         publicKey,
 			HandshakeLastSeen: handshakeLastSeen,
 		}
-		peers = append(peers, peer)
 	}
 
 	return peers, nil
@@ -153,19 +149,24 @@ func (w *WgHandshakeDataCli) GetHandshakeData() ([]byte, error) {
 	return exec.Command("wg", "show", w.interfaceName, "latest-handshakes").Output() //#nosec:G204
 }
 
-func parseWireguardConfig(configFile string) (*WgConfig, error) {
+func parseWireguardConfig(configFile string) (map[string]string, error) {
 	file, err := os.Open(configFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open configuration file: %w", err)
 	}
 	defer file.Close()
 
-	config := &WgConfig{
-		Peers: []Peer{},
-	}
+	peers := make(map[string]string)
 
 	var currentSection string
-	var currentPeer Peer
+	var publicKey, endpoint string
+
+	flush := func() {
+		if currentSection == "Peer" && publicKey != "" {
+			peers[publicKey] = endpoint
+		}
+		publicKey, endpoint = "", ""
+	}
 
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
@@ -178,11 +179,12 @@ func parseWireguardConfig(configFile string) (*WgConfig, error) {
 
 		// Handle section headers
 		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
-			if currentSection == "Peer" {
-				config.Peers = append(config.Peers, currentPeer)
-				currentPeer = Peer{} // Reset the peer for the next one
-			}
+			flush()
 			currentSection = strings.Trim(line, "[]")
+			continue
+		}
+
+		if currentSection != "Peer" {
 			continue
 		}
 
@@ -194,25 +196,20 @@ func parseWireguardConfig(configFile string) (*WgConfig, error) {
 		key := strings.TrimSpace(parts[0])
 		value := strings.Trim(strings.TrimSpace(parts[1]), `"`)
 
-		switch currentSection {
-		case "Peer":
-			switch key {
-			case "PublicKey":
-				currentPeer.PublicKey = value
-			case "Endpoint":
-				currentPeer.Endpoint = &value
-			}
+		switch key {
+		case "PublicKey":
+			publicKey = value
+		case "Endpoint":
+			endpoint = value
 		}
 	}
 
 	// Add the last peer if any
-	if currentSection == "Peer" {
-		config.Peers = append(config.Peers, currentPeer)
-	}
+	flush()
 
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("error reading configuration file: %w", err)
 	}
 
-	return config, nil
+	return peers, nil
 }

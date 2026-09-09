@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"net"
+	"net/netip"
 	"regexp"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -18,9 +20,9 @@ const (
 var hostnameRegex = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$`)
 
 type WireguardDriver interface {
-	GetPeers() ([]Peer, error)
+	GetPeers() (map[string]Peer, error)
 	ResetPeer(publicKey string, endpoint string) error
-	GetEndpoint(publicKey string) (string, error)
+	AttachEndpoints(peers map[string]Peer) (map[string]Peer, error)
 	StartTunnel() error
 	IsTunnelUp() (bool, error)
 }
@@ -32,7 +34,7 @@ type WgConfig struct {
 type Peer struct {
 	PublicKey         string
 	HandshakeLastSeen *time.Time
-	Endpoint          *string
+	Endpoint          string
 }
 
 type peerEvaluation struct {
@@ -80,9 +82,7 @@ func (t *Tunnelguard) conditionallyFixTunnel() {
 	connected, err := t.wg.IsTunnelUp()
 	if err != nil {
 		slog.Error("error while checking if tunnel is up", "error", err)
-	}
-
-	if connected {
+	} else if connected {
 		return
 	}
 
@@ -92,9 +92,15 @@ func (t *Tunnelguard) conditionallyFixTunnel() {
 	}
 }
 
-func evaluatePeers(peers []Peer, now time.Time, timeout time.Duration) peerEvaluation {
+func getPeersToReset(peers map[string]Peer, now time.Time, timeout time.Duration) peerEvaluation {
 	var ev peerEvaluation
+
 	for _, peer := range peers {
+		if !isResettableEndpoint(peer.Endpoint) {
+			slog.Debug("peer is not resettable", "pub_key", peer.PublicKey)
+			continue
+		}
+
 		age := timeout // never handshaked == maximally stale
 		if peer.HandshakeLastSeen != nil {
 			age = now.Sub(*peer.HandshakeLastSeen)
@@ -106,6 +112,7 @@ func evaluatePeers(peers []Peer, now time.Time, timeout time.Duration) peerEvalu
 			ev.Stale = append(ev.Stale, peer)
 		}
 	}
+
 	return ev
 }
 
@@ -127,18 +134,27 @@ func (t *Tunnelguard) conditionallyResetPeers() float64 {
 		return defaultWaitSeconds
 	}
 
-	ev := evaluatePeers(peers, time.Now(), handshakeTimeout)
-	for _, peer := range ev.Stale {
+	peers, err = t.wg.AttachEndpoints(peers)
+	if err != nil {
+		metrics.ErrorsTotal["get_endpoint"]++
+		slog.Error("could not get endpoints", "err", err)
+
+		t.conditionallyFixTunnel()
+		return defaultWaitSeconds
+	}
+
+	stalePeers := getPeersToReset(peers, time.Now(), handshakeTimeout)
+	for _, peer := range stalePeers.Stale {
 		slog.Info("resetting stale peer", "peer", peer.PublicKey, "never_seen", peer.HandshakeLastSeen == nil)
 		t.resetPeer(peer)
 	}
 
 	t.exportHandshakeMetrics(peers)
 
-	return nextWaitSeconds(ev.MaxAge, handshakeTimeout)
+	return nextWaitSeconds(stalePeers.MaxAge, handshakeTimeout)
 }
 
-func (t *Tunnelguard) exportHandshakeMetrics(peers []Peer) {
+func (t *Tunnelguard) exportHandshakeMetrics(peers map[string]Peer) {
 	for _, peer := range peers {
 		var ts int64
 		if peer.HandshakeLastSeen != nil {
@@ -149,60 +165,46 @@ func (t *Tunnelguard) exportHandshakeMetrics(peers []Peer) {
 			metrics.LatestHandshakeTimestamp[peer.PublicKey] = &peerMetricValue{}
 		}
 		metrics.LatestHandshakeTimestamp[peer.PublicKey].Value = ts
-		metrics.LatestHandshakeTimestamp[peer.PublicKey].NiceName = t.niceNames[peer.PublicKey]
+		metrics.LatestHandshakeTimestamp[peer.PublicKey].PeerName = t.peerNames[peer.PublicKey]
+		metrics.LatestHandshakeTimestamp[peer.PublicKey].Resettable = isResettableEndpoint(peer.Endpoint)
 	}
 }
 
 func (t *Tunnelguard) resetPeer(peer Peer) {
-	endpoint, err := t.wg.GetEndpoint(peer.PublicKey)
-	if err != nil {
-		metrics.ErrorsTotal["get_endpoint"]++
-		slog.Error("could not get endpoint", "pub_key", peer.PublicKey)
-
-		t.conditionallyFixTunnel()
-		return
-	}
-
-	if len(endpoint) == 0 {
-		return
-	}
-
-	endpointIsStatic, _ := isStaticEndpoint(endpoint)
-	if endpointIsStatic {
-		slog.Debug("not resetting peer, endpoint is static", "endpoint", endpoint, "pub_key", peer.PublicKey)
-		return
-	}
-
 	if metrics.PeerResets[peer.PublicKey] == nil {
 		metrics.PeerResets[peer.PublicKey] = &peerMetricValue{}
 	}
 	metrics.PeerResets[peer.PublicKey].Value = metrics.PeerResets[peer.PublicKey].Value + 1
-	metrics.PeerResets[peer.PublicKey].NiceName = t.niceNames[peer.PublicKey]
-	slog.Info("resetting peer", "endpoint", endpoint, "pub_key", peer.PublicKey)
-	if err := t.wg.ResetPeer(peer.PublicKey, endpoint); err != nil {
+	metrics.PeerResets[peer.PublicKey].PeerName = t.peerNames[peer.PublicKey]
+	slog.Info("resetting peer", "endpoint", peer.Endpoint, "pub_key", peer.PublicKey)
+	if err := t.wg.ResetPeer(peer.PublicKey, peer.Endpoint); err != nil {
 		slog.Error("failed to reset peer", "error", err)
 		metrics.ErrorsTotal["reset_peer"]++
 		t.conditionallyFixTunnel()
 	}
 }
 
-func isStaticEndpoint(endpoint string) (bool, error) {
-	host, _, err := net.SplitHostPort(endpoint)
-	if err != nil {
-		return false, err
+// isResettableEndpoint reports whether a peer's endpoint is worth re-applying.
+// Only hostnames are: re-resolving a literal address can't yield anything new,
+// so resetting such a peer would just re-pin it to the same IP.
+func isResettableEndpoint(endpoint string) bool {
+	if strings.TrimSpace(endpoint) == "" {
+		return false
 	}
 
-	if ip := net.ParseIP(host); ip != nil {
-		if ip.To4() != nil {
-			return true, nil
-		} else if ip.To16() != nil {
-			return true, nil
-		}
+	host, port, err := net.SplitHostPort(endpoint)
+	if err != nil || host == "" || port == "" {
+		return false
 	}
 
-	if hostnameRegex.MatchString(host) {
-		return false, nil
+	if _, err := strconv.ParseUint(port, 10, 16); err != nil {
+		return false
 	}
 
-	return false, errors.New("unknown format")
+	// A literal IP (v4, v6, or zoned v6) has nothing to re-resolve.
+	if _, err := netip.ParseAddr(host); err == nil {
+		return false
+	}
+
+	return hostnameRegex.MatchString(host)
 }
