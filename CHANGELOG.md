@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/soerenschneider/tunnelguard/compare/v1.1.1...v1.2.0) (2026-09-09)
+
+
+### Features
+
+* **metrics:** add go runtime metrics ([cdbe84d](https://github.com/soerenschneider/tunnelguard/commit/cdbe84df02d5539f7603c512541c9ccb14b51c02))
+
 ## [1.1.1](https://github.com/soerenschneider/tunnelguard/compare/v1.1.0...v1.1.1) (2026-09-04)
 
 
