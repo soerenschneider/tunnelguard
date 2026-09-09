@@ -42,7 +42,7 @@ type peerEvaluation struct {
 
 type Tunnelguard struct {
 	wg            WireguardDriver
-	niceNames     map[string]string
+	peerNames     map[string]string
 	once          sync.Once
 	metricsWriter *MetricsWriter
 }
